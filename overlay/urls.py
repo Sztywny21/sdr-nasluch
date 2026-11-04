@@ -1,0 +1,27 @@
+import sdr.views
+from django.urls import path
+
+urlpatterns = [
+    path("config/", sdr.views.config, name="sdr_config"),
+    path("group/add/", sdr.views.add_group, name="sdr_add_group"),
+    path("group/delete/<int:group_id>/", sdr.views.delete_group, name="sdr_delete_group"),
+    path("groups/", sdr.views.groups, name="sdr_groups"),
+    path("logs/", sdr.views.logs, name="sdr_logs"),
+    path("data/", sdr.views.data, name="sdr_data"),
+    path("all/", sdr.views.all, name="sdr_all"),
+    path("satellites/", sdr.views.satellites, name="sdr_satellites"),
+    path("spectrogram/<int:spectrogram_id>/", sdr.views.spectrogram, name="sdr_spectrogram"),
+    path("spectrogram/<int:spectrogram_id>/data/", sdr.views.spectrogram_data, name="sdr_spectrogram_data"),
+    path("spectrograms/", sdr.views.spectrograms, name="sdr_spectrograms"),
+    path("transmission/<int:transmission_id>/", sdr.views.transmission, name="sdr_transmission"),
+    path("transmission/<int:transmission_id>/data/", sdr.views.transmission_data, name="sdr_transmission_data"),
+    path("transmissions/", sdr.views.transmissions, name="sdr_transmissions"),
+    path("transcripts/", sdr.views.transcripts, name="sdr_transcripts"),
+    path("answers/", sdr.views.answers, name="sdr_answers"),
+    path("live/", sdr.views.live_log, name="sdr_live"),
+    path("live/feed/", sdr.views.live_feed, name="sdr_live_feed"),
+    path("gain_tester/", sdr.views.gain_tester, name="sdr_gain_tester"),
+    path("gain_tests/", sdr.views.gain_tests, name="sdr_gain_tests"),
+    path("gain_test/<int:gain_test_id>/", sdr.views.gain_test, name="sdr_gain_test"),
+    path("settings/", sdr.views.settings, name="sdr_settings"),
+]

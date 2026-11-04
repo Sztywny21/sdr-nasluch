@@ -1,0 +1,7 @@
+services:
+  transcribe:
+    environment:
+      PULSE_SERVER: unix:/run/pulse/native
+    volumes:
+      - ${XDG_RUNTIME_DIR}/pulse/native:/run/pulse/native
+      - ${HOME}/.config/pulse/cookie:/root/.config/pulse/cookie:ro

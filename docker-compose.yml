@@ -1,0 +1,34 @@
+services:
+  hub:
+    build:
+      context: .
+      dockerfile: hub/Dockerfile
+    image: sdr-nasluch:hub
+    restart: unless-stopped
+    ports:
+      - "8000:80"
+    environment:
+      TZ: Europe/Warsaw
+    volumes:
+      - ./data:/app/data
+      - ./log:/var/log/sdr
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+
+  transcribe:
+    build:
+      context: .
+      dockerfile: transcribe/Dockerfile
+    image: sdr-nasluch:transcribe
+    restart: unless-stopped
+    depends_on:
+      - hub
+    env_file:
+      - .env
+    environment:
+      TZ: Europe/Warsaw
+      SDR_DATA: /data
+      SDR_STATE: /state
+    volumes:
+      - ./data:/data
+      - ./state:/state

@@ -1,0 +1,31 @@
+{% extends "generic/section_big.html" %}
+{% block section_title %}ODPOWIEDZI: {{ items|length }}{% endblock %}
+{% block section_content %}
+<div class="row mt-2">
+    <div class="col-12">
+        <p>Odpowiedzi na nagrania, które zaczynają się od słowa pytanie. Zwykłe nagrania zostają w Tekst.</p>
+        <div class="table-responsive">
+            <table class="table table-striped table-bordered table-hover">
+                <tr>
+                    <th>Data</th>
+                    <th>Częstotliwość</th>
+                    <th>Pytanie</th>
+                    <th>Odpowiedź</th>
+                    <th>Szczegóły</th>
+                </tr>
+                {% for item in items %}
+                <tr>
+                    <td class="py-1"><nobr>{{ item.begin }}</nobr></td>
+                    <td class="py-1">{{ item.frequency_mhz }} MHz</td>
+                    <td class="py-1" style="white-space: pre-wrap;">{{ item.ask }}</td>
+                    <td class="py-1" style="white-space: pre-wrap;">{% if item.answer %}{{ item.answer }}{% elif item.answer_error %}{{ item.answer_error }}{% endif %}</td>
+                    <td class="py-1"><a href="{% url 'sdr_transmission' item.id %}" class="btn btn-primary">open</a></td>
+                </tr>
+                {% empty %}
+                <tr><td colspan="5">Brak odpowiedzi. Powiedz na początku nagrania słowo pytanie.</td></tr>
+                {% endfor %}
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}

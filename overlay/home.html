@@ -1,0 +1,32 @@
+{% extends "generic/section_big.html" %}
+
+{% block section_title %}Nasłuch radia{% endblock %}
+
+{% block section_content %}
+<style>
+    .welcome-wrap {
+        max-width: 34rem;
+        margin: 0 auto;
+        padding: 0.25rem 1rem 2.5rem;
+        text-align: center;
+        font-size: 1.28rem;
+        line-height: 1.6;
+    }
+    .welcome-wrap .card {
+        padding: 1.6rem 1.4rem 1.45rem;
+    }
+    .welcome-wrap a {
+        font-weight: 650;
+        white-space: nowrap;
+    }
+    .welcome-note {
+        margin: 0.7rem 0 0;
+    }
+</style>
+<div class="welcome-wrap">
+    <div class="card">
+        <p>Podjebany projekt od Borysa <a href="https://github.com/shajen/sdr-hub" target="_blank" rel="noopener">SDR Hub</a>.</p>
+        <p class="welcome-note">Podrasowany pod transkrypcję.</p>
+    </div>
+</div>
+{% endblock %}

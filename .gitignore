@@ -1,0 +1,8 @@
+.env
+data/
+log/
+state/
+**/__pycache__/
+**/*.pyc
+**/*.wav
+*.hdr

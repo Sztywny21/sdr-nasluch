@@ -1,0 +1,80 @@
+{% extends "generic/section_big.html" %}
+{% block section_title %}Na żywo{% endblock %}
+{% block section_content %}
+<style>
+    .live-panel {
+        display: grid;
+        gap: 0.8rem;
+        max-width: 46rem;
+        margin: 0 auto 2rem;
+        padding: 0 0.5rem;
+    }
+    .live-card {
+        background: #fff;
+        border: 1px solid rgba(22, 50, 92, 0.08);
+        border-radius: 0.8rem;
+        box-shadow: 0 8px 22px rgba(16, 36, 68, 0.04);
+        padding: 0.9rem 1.05rem 0.75rem;
+    }
+    .live-kicker {
+        margin: 0 0 0.35rem;
+        color: #5c6b80;
+        font-size: 0.78rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+    }
+    .live-main {
+        margin: 0 0 0.35rem;
+        color: #1c3f73;
+        font-size: 1.35rem;
+        font-weight: 650;
+    }
+    .live-heard {
+        margin: 0;
+        font-size: 1.12rem;
+        line-height: 1.45;
+    }
+    .live-meta, .live-body p {
+        margin: 0.45rem 0 0;
+        color: #3d4b5e;
+        line-height: 1.4;
+    }
+    .live-body ul {
+        margin: 0;
+        padding-left: 1.1rem;
+    }
+    .live-body li {
+        margin: 0.35rem 0;
+        line-height: 1.35;
+    }
+    .live-ok .live-body p {
+        color: #1d6b45;
+        margin-top: 0;
+    }
+    .live-bad {
+        border-color: rgba(160, 48, 48, 0.28);
+        background: #fff7f7;
+    }
+    .live-bad .live-body p {
+        color: #8d2b2b;
+    }
+</style>
+<div id="live" class="live-panel"><p>Ładuję…</p></div>
+<script>
+const box = document.getElementById("live");
+async function pull() {
+    try {
+        const response = await fetch("{% url 'sdr_live_feed' %}", {cache: "no-store"});
+        if (!response.ok) {
+            box.textContent = "Nie mogę pobrać stanu.";
+            return;
+        }
+        box.innerHTML = await response.text();
+    } catch (error) {
+        box.textContent = "Nie mogę pobrać stanu.";
+    }
+}
+pull();
+setInterval(pull, 2000);
+</script>
+{% endblock %}

@@ -1,0 +1,630 @@
+import os
+import html
+import json
+import re
+import sqlite3
+from datetime import datetime as clock
+from zoneinfo import ZoneInfo
+from common.helpers import *
+from django import forms
+from django.contrib import messages
+from django.contrib.admin.views.decorators import staff_member_required
+from django.contrib.auth.decorators import login_required, permission_required
+from django.core.paginator import Paginator
+from django.db.models import F, Count, Min, Max
+from django.db.models.functions import TruncSecond, TruncDate, Length
+from django.http import Http404
+from django.http import HttpResponse, JsonResponse
+from django.shortcuts import render, redirect
+from django.utils.timezone import localtime
+from sdr.app_settings import *
+from sdr.models import *
+from sdr.signals import *
+import common.helpers
+import common.utils.files
+import common.utils.filters
+import math
+import monitor.settings
+import numpy as np
+import sdr.drawer
+import sdr.utils.group
+import sdr.utils.satellites
+import uuid
+
+
+def get_download_filename(name, id, extension, dt):
+    return "%s%d_%s.%s" % (name, id, localtime(dt).strftime("%Y%m%d_%H%M%S"), extension)
+
+
+def get_download_raw_iq_filename(name, id, type, extension, frequency, sample_rate, dt):
+    return "%s%d_%s_%d_%d_%s.%s" % (name, id, localtime(dt).strftime("%Y%m%d_%H%M%S"), frequency, sample_rate, type, extension)
+
+
+@login_required()
+@permission_required("sdr.view_spectrogram", raise_exception=True)
+def spectrograms(request):
+    if AppSettings.get(AppSettingsKey.GAIN_TESTER_DATA_ENABLED):
+        items = Spectrogram.objects
+    else:
+        items = Spectrogram.objects.exclude(source="gain tester")
+    items = items.select_related("device").annotate(
+        device_name=F("device__name"),
+        datetime=F("begin_model_date"),
+        date=TruncDate("begin_model_date"),
+        samples=Length("labels") / 8,
+        sample_rate=F("end_frequency") - F("begin_frequency"),
+        frequency=F("begin_frequency") + (F("end_frequency") - F("begin_frequency")) / 2,
+        duration=TruncSecond("end_real_date") - TruncSecond("begin_real_date"),
+    )
+    options_lists = common.utils.filters.get_options_lists(request, items, ["device_name", "source"])
+    items = common.utils.filters.filter(request, items)
+    items = common.utils.filters.order_by(request, items, ["-datetime", "frequency", "device_name"])
+    page_size = int(request.GET.get("page_size", "100"))
+    items = Paginator(items, page_size).get_page(request.GET.get("page"))
+    return render(request, "spectrograms.html", dict({"items": items}, **options_lists))
+
+
+@login_required()
+@permission_required("sdr.view_spectrogram", raise_exception=True)
+def spectrogram(request, spectrogram_id):
+    mode = request.GET.get("mode", "static")
+    spectrogram = Spectrogram.objects.annotate(
+        samples=Length("labels") / 8,
+        sample_rate=F("end_frequency") - F("begin_frequency"),
+        frequency=F("begin_frequency") + (F("end_frequency") - F("begin_frequency")) / 2,
+        duration=TruncSecond("end_real_date") - TruncSecond("begin_real_date"),
+    ).get(id=spectrogram_id)
+    return render(request, "spectrogram.html", {"spectrogram": spectrogram, "mode": mode})
+
+
+@login_required()
+@permission_required("sdr.view_spectrogram", raise_exception=True)
+def spectrogram_data(request, spectrogram_id):
+    format = request.GET.get("format", "image")
+    s = Spectrogram.objects.get(id=spectrogram_id)
+    if format == "image":
+        filename = "tmp_%s.jpg" % uuid.uuid4().hex
+        y_labels = np.frombuffer(s.labels, dtype=np.uint64)
+        y_size = y_labels.size
+        x_size = s.data_file.file.size // y_size
+        data = np.memmap(s.data_file.path, dtype=np.int8, mode="r", shape=(y_size, x_size))
+
+        kwargs = {"draw_frequency": False, "draw_power": False, "draw_time": False, "draw_data": False}
+        data_type = request.GET.get("data", "")
+        if data_type == "left":
+            kwargs["draw_time"] = True
+        elif data_type == "top":
+            kwargs["draw_power"] = True
+            kwargs["draw_frequency"] = True
+        elif data_type == "main":
+            kwargs["draw_data"] = True
+        else:
+            kwargs = {}
+
+        drawer = sdr.drawer.Drawer(frequency_labels_count=(s.end_frequency - s.begin_frequency) // 200000, **kwargs)
+        drawer.draw_spectrogram(data, filename, x_size, y_size, s.begin_frequency, s.end_frequency, y_labels)
+        return file_response(filename, get_download_filename("spectrogram", s.id, "jpg", s.begin_real_date))
+    elif format == "raw":
+        filename = get_download_filename("spectrogram", s.id, "raw", s.begin_real_date)
+        return redirect_file_response(filename, s.data_file.url)
+
+
+@login_required()
+@permission_required("sdr.view_transmission", raise_exception=True)
+def transmissions(request):
+    if AppSettings.get(AppSettingsKey.GAIN_TESTER_DATA_ENABLED):
+        items = Transmission.objects
+    else:
+        items = Transmission.objects.exclude(source="gain tester")
+    items = (
+        items.select_related("device")
+        .select_related("group")
+        .annotate(
+            device_name=F("device__name"),
+            group_name=F("group__name"),
+            modulation=F("group__modulation"),
+            datetime=F("begin_date"),
+            duration=TruncSecond("end_date") - TruncSecond("begin_date"),
+            frequency=F("begin_frequency") + (F("end_frequency") - F("begin_frequency")) / 2,
+            class_name=F("audio_class__name"),
+            class_subname=F("audio_class__subname"),
+        )
+    )
+    options_lists = common.utils.filters.get_options_lists(request, items, ["device_name", "modulation", "group_name", "class_name"])
+    items = common.utils.filters.filter(request, items)
+    items = common.utils.filters.order_by(request, items, ["-datetime", "frequency"])
+    page_size = int(request.GET.get("page_size", "100"))
+    items = Paginator(items, page_size).get_page(request.GET.get("page"))
+    return render(request, "transmissions.html", dict({"items": items}, **options_lists))
+
+
+@login_required()
+@permission_required("sdr.view_transmission", raise_exception=True)
+def transmission(request, transmission_id):
+    transmission = Transmission.objects.annotate(
+        duration=TruncSecond("end_date") - TruncSecond("begin_date"),
+        sample_rate=F("end_frequency") - F("begin_frequency"),
+        frequency=F("begin_frequency") + (F("end_frequency") - F("begin_frequency")) / 2,
+    ).get(id=transmission_id)
+    record = transcript_record(transmission_id)
+    answer = record.get("answer") or record.get("answer_error") or ""
+    return render(request, "transmission.html", {"transmission": transmission, "transcript": record.get("text") or "", "answer": answer})
+
+
+@login_required()
+@permission_required("sdr.view_transmission", raise_exception=True)
+def transmission_data(request, transmission_id):
+    format = request.GET.get("format")
+    t = Transmission.objects.get(id=transmission_id)
+    data = np.memmap(t.data_file.path, dtype=np.uint8, mode="r")
+    sample_rate = t.end_frequency - t.begin_frequency
+    if format == "spectrogram":
+        filename = get_download_filename("transmission", t.id, "jpg", t.begin_date)
+        data = make_spectrogram(data, sample_rate)
+        drawer = sdr.drawer.Drawer(frequency_labels_count=8, draw_time=False, draw_power=True, text_size=16, text_stroke=2, min_width=1024)
+        drawer.draw_spectrogram(data, filename, data.shape[1], data.shape[0], t.begin_frequency, t.end_frequency, list(range(data.shape[0])))
+        return file_response(filename)
+    elif format == "gqrx":
+        filename = get_download_raw_iq_filename("transmission", t.id, "fc", "raw", t.middle_frequency(), sample_rate, t.begin_date)
+        return streaming_file_response(filename, convert_uint8_to_float32_stream(t.data_file.path), t.data_file.size * 4)
+    elif format == "raw_wav":
+        filename = get_download_filename("transmission", t.id, "wav", t.begin_date)
+        header = wav_header_from_cu8_pcm16(t.data_file.path, sample_rate)
+        return streaming_file_response(filename, wav_stream_from_cu8_pcm16(t.data_file.path, sample_rate), len(header) + t.data_file.size * 2)
+    elif format == "raw":
+        filename = get_download_filename("transmission", t.id, "bin", t.begin_date)
+        return redirect_file_response(filename, t.data_file.url)
+    elif t.group.modulation in ["FM", "AM"]:
+        filename = get_download_filename("transmission", t.id, "wav", t.begin_date)
+        sdr.signals.decode_audio(t.data_file.path, filename, t.group.modulation, sample_rate)
+        return file_response(filename)
+
+
+@staff_member_required()
+@permission_required("sdr.change_group", raise_exception=True)
+def groups(request, message_success="", message_error=""):
+    items = Group.objects.annotate(bandwidth=F("end_frequency") - F("begin_frequency"), transmissions_count=Count("transmission"))
+    options_lists = common.utils.filters.get_options_lists(request, items, ["name", "modulation"])
+    items = common.utils.filters.filter(request, items)
+    items = common.utils.filters.order_by(request, items, ["begin_frequency", "-bandwidth"])
+    page_size = int(request.GET.get("page_size", "100"))
+    items = Paginator(items, page_size).get_page(request.GET.get("page"))
+    messages.success(request, message_success)
+    messages.error(request, message_error)
+    return render(request, "groups.html", dict({"items": items}, **options_lists))
+
+
+@staff_member_required()
+@permission_required("sdr.change_group", raise_exception=True)
+def update_groups(request):
+    sdr.utils.group.update_groups()
+
+
+@staff_member_required()
+@permission_required("sdr.change_group", raise_exception=True)
+def add_group(request):
+    try:
+        name = request.GET["name"]
+        begin_frequency = int(request.GET["begin_frequency"])
+        end_frequency = int(request.GET["end_frequency"])
+        modulation = request.GET["modulation"]
+        Group.objects.get_or_create(name=name, begin_frequency=begin_frequency, end_frequency=end_frequency, modulation=modulation)
+        sdr.utils.group.update_groups()
+        return groups(request, "Success!", "")
+    except:
+        return groups(request, "", "Error!")
+
+
+@staff_member_required()
+@permission_required("sdr.change_group", raise_exception=True)
+def delete_group(request, group_id):
+    try:
+        default_group_id = get_default_group_id()
+        if int(group_id) == default_group_id:
+            return groups(request, "", "Can not delete Default group!")
+        else:
+            Group.objects.get(id=group_id).transmission_set.update(group_id=default_group_id)
+            Group.objects.filter(id=group_id).delete()
+            sdr.utils.group.update_groups()
+            return groups(request, "Success!", "")
+    except:
+        return groups(request, "", "Error!")
+
+
+@staff_member_required()
+@permission_required("sdr.change_device", raise_exception=True)
+def config(request):
+    return render(request, "config.html", {"mqtt": monitor.settings.MQTT})
+
+
+@staff_member_required()
+def logs(request):
+    return common.utils.files.get_directory_as_archive_response([(monitor.settings.LOG_DIR, "logs")], "logs")
+
+
+@staff_member_required()
+def data(request):
+    return common.utils.files.get_directory_as_archive_response([os.path.join(monitor.settings.BASE_DIR, "data")], "data")
+
+
+@staff_member_required()
+def all(request):
+    return common.utils.files.get_directory_as_archive_response([(monitor.settings.LOG_DIR, "logs"), os.path.join(monitor.settings.BASE_DIR, "data")], "all")
+
+
+class SatellitesForm(forms.Form):
+    latitude = forms.FloatField()
+    longitude = forms.FloatField()
+    altitude = forms.FloatField()
+    satellites = forms.CharField()
+
+    def clean_satellites(self):
+        try:
+            raw = self.cleaned_data["satellites"]
+            satellites = []
+            for satellite in raw.split(","):
+                if satellite.strip():
+                    data = satellite.split(";")
+                    satellites.append({"id": data[0], "name": data[1]})
+            return satellites
+        except ValueError:
+            raise forms.ValidationError("Invalid satellites")
+
+
+@login_required()
+def satellites(request):
+    is_json = common.helpers.is_json_request(request)
+    form = SatellitesForm(request.GET)
+    if form.is_valid():
+        reader = sdr.utils.satellites.SatellitesFlightReader(
+            form.cleaned_data["latitude"],
+            form.cleaned_data["longitude"],
+            form.cleaned_data["altitude"],
+            True,
+        )
+        flights = reader.get_visible_satellites_flights(
+            [
+                {
+                    "id": satellite["id"],
+                    "name": satellite["name"],
+                    "frequency": 0,
+                    "bandwidth": 0,
+                    "modulation": "",
+                }
+                for satellite in form.cleaned_data["satellites"]
+            ],
+            is_json,
+        )
+    else:
+        flights = []
+
+    if is_json:
+        return JsonResponse(flights, safe=False)
+    else:
+        return render(request, "flights.html", {"flights": flights})
+
+
+@staff_member_required()
+def gain_tester(request):
+    return render(request, "gain_tester.html", {"mqtt": monitor.settings.MQTT})
+
+
+@login_required()
+def gain_tests(request):
+    items = GainTest.objects.all()
+    items = common.utils.filters.filter(request, items)
+    items = common.utils.filters.order_by(request, items, ["-datetime", "name"])
+    page_size = int(request.GET.get("page_size", "100"))
+    items = Paginator(items, page_size).get_page(request.GET.get("page"))
+    return render(request, "gain_tests.html", {"items": items})
+
+
+@login_required()
+def gain_test(request, gain_test_id):
+    gain_test = GainTest.objects.get(id=gain_test_id)
+    devices = Device.objects.filter(name__startswith=gain_test.device_prefix)
+    spectrograms = Spectrogram.objects.filter(device__in=devices).select_related("device").order_by("begin_real_date")
+    real_date = Spectrogram.objects.filter(device__in=devices).aggregate(begin_real_date=Min("begin_real_date"), end_real_date=Max("end_real_date"))
+    if len(spectrograms) == 0:
+        raise Http404()
+    spectrogram = spectrograms[0]
+    return render(request, "gain_test.html", {"name": gain_test.name, "spectrogram": spectrogram, "spectrograms": spectrograms} | real_date)
+
+
+@staff_member_required()
+def settings(request):
+    if request.method == "POST":
+        form = AppSettingsForm(request.POST)
+        if form.is_valid():
+            form.save()
+            messages.success(request, "Settings updated successfully!")
+            return redirect("sdr_settings")
+    else:
+        form = AppSettingsForm()
+        form.load_initial()
+    return render(request, "app_settings.html", {"form": form})
+
+
+def _load_transcripts():
+    path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "transcripts.json"))
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+            return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def transcript_for(transmission_id):
+    for item in _load_transcripts():
+        if item.get("id") == transmission_id:
+            return item.get("text") or ""
+    return ""
+
+
+def transcript_record(transmission_id):
+    for item in _load_transcripts():
+        if item.get("id") == transmission_id:
+            return item
+    return {}
+
+
+@login_required()
+@permission_required("sdr.view_transmission", raise_exception=True)
+def transcripts(request):
+    items = sorted(_load_transcripts(), key=lambda item: item.get("id") or 0, reverse=True)
+    return render(request, "transcripts.html", {"items": items})
+
+
+@login_required()
+@permission_required("sdr.view_transmission", raise_exception=True)
+def answers(request):
+    items = []
+    for item in _load_transcripts():
+        if not item.get("question"):
+            continue
+        row = dict(item)
+        row["answer"] = row.get("answer") or ""
+        row["answer_error"] = row.get("answer_error") or ""
+        row["ask"] = row.get("ask") or ""
+        items.append(row)
+    items.sort(key=lambda item: item.get("id") or 0, reverse=True)
+    return render(request, "answers.html", {"items": items})
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+_WARSAW = ZoneInfo("Europe/Warsaw")
+
+
+def _data_path(*parts):
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", *parts))
+
+
+def _tail_text(path, size):
+    with open(path, "rb") as handle:
+        handle.seek(0, 2)
+        handle.seek(max(0, handle.tell() - size))
+        return handle.read().decode("utf-8", "replace")
+
+
+def _hz_label(raw):
+    digits = re.sub(r"\D", "", raw or "")
+    if not digits:
+        return raw or ""
+    return f"{int(digits) / 1_000_000:.3f} MHz"
+
+
+def _warsaw_clock(text):
+    raw = (text or "").strip().replace("Z", "")
+    if not raw:
+        return ""
+    try:
+        moment = clock.fromisoformat(raw)
+    except ValueError:
+        return raw[11:19]
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=ZoneInfo("UTC"))
+    return moment.astimezone(_WARSAW).strftime("%H:%M:%S")
+
+
+def _scanner_story():
+    path = "/var/log/sdr/sdr_scanner_debug.log"
+    try:
+        age = clock.now().timestamp() - os.path.getmtime(path)
+        text = _tail_text(path, 500_000)
+    except Exception:
+        return False, [], None
+    events = []
+    last_recorder = None
+    for raw in text.splitlines():
+        clean = _ANSI.sub("", raw).strip()
+        match = re.match(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", clean)
+        if not match or "[info" not in clean:
+            continue
+        stamp = match.group(1)[11:19]
+        if "[recorder" in clean and "start recorder" in clean:
+            freq = re.search(r"frequency:\s*([0-9.]+)\s*Hz", clean)
+            line = f"{stamp}  Skaner nagrywa {_hz_label(freq.group(1) if freq else '')}."
+            events.append(line)
+            last_recorder = ("start", stamp, _hz_label(freq.group(1) if freq else ""))
+        elif "[recorder" in clean and "stop recorder" in clean:
+            freq = re.search(r"frequency:\s*([0-9.]+)\s*Hz", clean)
+            duration = re.search(r"time:\s*(\d+)\s*ms", clean)
+            seconds = f"{int(duration.group(1)) / 1000:.1f} s" if duration else ""
+            line = f"{stamp}  Skaner skończył nagranie {_hz_label(freq.group(1) if freq else '')}"
+            if seconds:
+                line += f", {seconds}"
+            events.append(line + ".")
+            last_recorder = ("stop", stamp, _hz_label(freq.group(1) if freq else ""), seconds)
+        elif "[noise" in clean and "learning completed" in clean:
+            freq = re.search(r"frequency:\s*([0-9.]+)\s*Hz", clean)
+            events.append(f"{stamp}  Skaner nauczył się szumu, {_hz_label(freq.group(1) if freq else '')}.")
+        elif "[scanner" in clean and "started" in clean:
+            events.append(f"{stamp}  Skaner wystartował.")
+        elif "set config" in clean:
+            events.append(f"{stamp}  Skaner przyjął ustawienia.")
+    fresh = age < 90
+    return fresh, events[-80:], last_recorder
+
+
+def _spectrogram_now():
+    try:
+        connection = sqlite3.connect(_data_path("db.sqlite3"), timeout=1)
+        row = connection.execute(
+            "select id, length(labels)/8, end_real_date from sdr_spectrogram order by id desc limit 1"
+        ).fetchone()
+        connection.close()
+    except Exception:
+        return "Spektrogram: nie mogę odczytać."
+    if not row:
+        return "Spektrogram: jeszcze go nie ma."
+    return f"Spektrogram {row[0]}: {row[1]} próbek, ostatnia {_warsaw_clock(row[2])}."
+
+
+def _recording_gap():
+    try:
+        with open(_data_path("config.json"), encoding="utf-8") as handle:
+            config = json.load(handle)
+        gap = int(config["recording"]["max_noise_time_ms"])
+        band = config["devices"][0]["ranges"][0]
+        start = band["start"] / 1_000_000
+        stop = band["stop"] / 1_000_000
+        return f"Słucha {start:.0f}–{stop:.0f} MHz.", f"Przerwa w mowie do {gap / 1000:.0f} s zostaje jednym nagraniem."
+    except Exception:
+        return "Słucha ustawionego pasma.", ""
+
+
+def _heard_sessions():
+    try:
+        with open(_data_path("stt_live.log"), encoding="utf-8", errors="replace") as handle:
+            lines = [line.strip() for line in handle.read().splitlines() if line.strip() and line[:2].isdigit()]
+    except Exception:
+        return []
+    sessions = []
+    current = None
+    for line in lines:
+        body = line[10:] if len(line) > 10 else line
+        if "Słucham nagrania" in line:
+            if current:
+                sessions.append(current)
+            current = {"time": line[:8], "where": body, "heard": "", "note": "", "error": ""}
+            continue
+        if current is None:
+            continue
+        if body.startswith("Usłyszałem:"):
+            current["heard"] = body.split(":", 1)[1].strip()
+        elif body.startswith("Odpowiedź:"):
+            current["note"] = "Odpowiedź: " + body.split(":", 1)[1].strip()
+        elif "Na Telegram nie wysyłam" in body:
+            current["note"] = "Na telefon nie poszło."
+        elif "Wysłałem na Telegram" in body:
+            current["note"] = "Poszło na telefon."
+        elif body.startswith("Błąd") or "nie udał" in body or "nie odpowiedział" in body:
+            current["error"] = body
+    if current:
+        sessions.append(current)
+    return sessions[-8:]
+
+
+def _recent_problems(sessions):
+    problems = []
+    for item in sessions:
+        if item["error"]:
+            problems.append(item["time"] + "  " + item["error"])
+    try:
+        text = _tail_text("/var/log/sdr/sdr_monitor_worker.log", 80_000)
+    except Exception:
+        text = ""
+    now = clock.now()
+    seen = set()
+    for raw in text.splitlines():
+        match = re.match(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", raw)
+        if not match or not any(word in raw for word in ("WARNING", "ERROR", "Error", "exception")):
+            continue
+        try:
+            moment = clock.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+        if (now - moment).total_seconds() > 5 * 60:
+            continue
+        if "can not parse" in raw:
+            continue
+        if "UNIQUE constraint" in raw:
+            message = "Spektrogram nie zapisał się, bo taki zapis już był."
+        elif "database is locked" in raw:
+            message = "Baza była chwilowo zajęta."
+        else:
+            message = raw.split("] ")[-1][:180]
+        if message in seen:
+            continue
+        seen.add(message)
+        problems.append(match.group(1)[11:19] + "  " + message)
+    fresh, _events, _recorder = _scanner_story()
+    if not fresh:
+        problems.append("Skaner nie odzywa się w logu.")
+    return problems[-6:]
+
+
+def _card(kicker, body, extra=""):
+    return (
+        f'<section class="live-card {extra}">'
+        f'<p class="live-kicker">{html.escape(kicker)}</p>'
+        f'<div class="live-body">{body}</div>'
+        f"</section>"
+    )
+
+
+def _live_html():
+    fresh, _events, recorder = _scanner_story()
+    band, pause = _recording_gap()
+    if recorder and recorder[0] == "start":
+        state = f"Nagrywa {recorder[2]} od {recorder[1]}."
+    elif fresh:
+        state = band
+    else:
+        state = "Nie widać skanera."
+    sessions = _heard_sessions()
+    last = sessions[-1] if sessions else None
+    if last and last["heard"]:
+        heard = html.escape(last["heard"][:360])
+        meta = html.escape(last["time"] + "  " + last["where"].replace("Słucham nagrania ", ""))
+        if last["note"]:
+            meta += "  " + html.escape(last["note"])
+    else:
+        heard = "Jeszcze nic nie usłyszał."
+        meta = ""
+    problems = _recent_problems(sessions)
+    if problems:
+        error_html = "".join(f"<p>{html.escape(item)}</p>" for item in problems)
+        error_card = _card("Błędy", error_html, "live-bad")
+    else:
+        error_card = _card("Błędy", "<p>Błędów nie ma.</p>", "live-ok")
+    recent = []
+    for item in reversed(sessions[:-1]):
+        short = item["heard"] or item["error"] or item["note"] or "bez tekstu"
+        if len(short) > 110:
+            short = short[:107] + "..."
+        where = item["where"].replace("Słucham nagrania ", "")
+        recent.append(f"<li><b>{html.escape(item['time'])}</b> {html.escape(where)} — {html.escape(short)}</li>")
+        if len(recent) == 6:
+            break
+    recent_html = "<ul>" + "".join(recent) + "</ul>" if recent else "<p>Brak wcześniejszych nagrań w tym oknie.</p>"
+    parts = [
+        _card("Teraz", f"<p class=\"live-main\">{html.escape(state)}</p><p>{html.escape(pause)}</p><p>{html.escape(_spectrogram_now())}</p>"),
+        _card("Ostatnio usłyszał", f"<p class=\"live-heard\">{heard}</p><p class=\"live-meta\">{meta}</p>"),
+        error_card,
+        _card("Wcześniej", recent_html),
+    ]
+    return "".join(parts)
+
+
+@login_required()
+@permission_required("sdr.view_transmission", raise_exception=True)
+def live_log(request):
+    return render(request, "live.html", {})
+
+
+@login_required()
+@permission_required("sdr.view_transmission", raise_exception=True)
+def live_feed(request):
+    return HttpResponse(_live_html(), content_type="text/html; charset=utf-8")
