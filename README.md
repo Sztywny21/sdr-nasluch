@@ -1,10 +1,8 @@
 # Nasłuch
 
-Jeden projekt Dockera: skaner i strona [SDR Hub](https://github.com/shajen/sdr-hub) oraz transkrypcja, telefon i głos. Klucze API wpisujesz lokalnie. Git ich nie zapisuje.
+nie znam sie na tym ale jest to zmodyfikowana wersja projektu od "https://github.com/shajen/sdr-hub", dodana jest transkrypcja zapisanych rozmów. pzdr
 
 ## Pobranie
-
-Na drugim komputerze zainstaluj [Docker](https://docs.docker.com/engine/install/), wepnij RTL-SDR i pobierz projekt:
 
 ```bash
 git clone https://github.com/Sztywny21/sdr-nasluch.git
@@ -12,7 +10,7 @@ cd sdr-nasluch
 cp .env.example .env
 ```
 
-Potem wpisz klucze, tak jak niżej, i uruchom:
+Potem wpisz klucze
 
 ```bash
 ./start.sh
